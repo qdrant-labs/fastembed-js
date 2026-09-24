@@ -1,6 +1,6 @@
 {
   "name": "fastembed",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "description": "NodeJS implementation of @Qdrant/fastembed",
   "keywords": [
     "embeddings",
@@ -9,9 +9,9 @@
     "semantic",
     "search"
   ],
-  "repository": "github:Anush008/fastembed-js",
+  "repository": "github:qdrant-labs/fastembed-js",
   "license": "MIT",
-  "author": "Anush008 <anushshetty90@gmail.com>",
+  "author": "Anush008 <mail@anush.sh>",
   "exports": {
     ".": {
       "import": {
@@ -41,12 +41,10 @@
     "@anush008/tokenizers": "^0.0.0",
     "@huggingface/hub": "^2.7.1",
     "onnxruntime-node": "1.21.0",
-    "progress": "^2.0.3",
-    "tar": "^6.2.0"
+    "progress": "^2.0.3"
   },
   "devDependencies": {
     "@types/progress": "^2.0.5",
-    "@types/tar": "^6.1.6",
     "typescript": "^5.2.2",
     "vitest": "^0.34.4"
   },

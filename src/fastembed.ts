@@ -1,10 +1,11 @@
 import { AddedToken, Tokenizer } from "@anush008/tokenizers";
 import fs, { PathLike } from "fs";
-import https from "https";
 import * as ort from "onnxruntime-node";
 import path from "path";
 import Progress from "progress";
-import tar from "tar";
+import { Readable, Transform } from "stream";
+import { pipeline } from "stream/promises";
+import { ReadableStream } from "stream/web";
 import { downloadFileToCacheDir } from "@huggingface/hub";
 
 export enum ExecutionProvider {
@@ -24,6 +25,11 @@ export enum EmbeddingModel {
   BGESmallZH = "fast-bge-small-zh-v1.5",
   MLE5Large = "fast-multilingual-e5-large",
   CUSTOM = "custom",
+}
+
+export enum Pooling {
+  CLS = "cls",
+  Mean = "mean",
 }
 
 export enum SparseEmbeddingModel {
@@ -50,6 +56,67 @@ interface ModelInfo {
   description: string;
 }
 
+interface ModelSource {
+  // Hugging Face repository the model files are downloaded from
+  repo: string;
+  // Path of the ONNX model file inside the repository
+  modelFile: string;
+  // Extra files the model needs besides the tokenizer files, e.g. external weights
+  additionalFiles?: string[];
+  pooling: Pooling;
+}
+
+const TOKENIZER_FILES = [
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "config.json",
+  "special_tokens_map.json",
+];
+
+const MODEL_SOURCES: Record<
+  Exclude<EmbeddingModel, EmbeddingModel.CUSTOM>,
+  ModelSource
+> = {
+  [EmbeddingModel.AllMiniLML6V2]: {
+    repo: "Qdrant/all-MiniLM-L6-v2-onnx",
+    modelFile: "model.onnx",
+    pooling: Pooling.Mean,
+  },
+  [EmbeddingModel.BGEBaseEN]: {
+    repo: "Qdrant/fast-bge-base-en",
+    modelFile: "model_optimized.onnx",
+    pooling: Pooling.CLS,
+  },
+  [EmbeddingModel.BGEBaseENV15]: {
+    repo: "Qdrant/bge-base-en-v1.5-onnx-Q",
+    modelFile: "model_optimized.onnx",
+    pooling: Pooling.CLS,
+  },
+  [EmbeddingModel.BGESmallEN]: {
+    repo: "Qdrant/bge-small-en",
+    modelFile: "model_optimized.onnx",
+    pooling: Pooling.CLS,
+  },
+  [EmbeddingModel.BGESmallENV15]: {
+    repo: "Qdrant/bge-small-en-v1.5-onnx-Q",
+    modelFile: "model_optimized.onnx",
+    pooling: Pooling.CLS,
+  },
+  [EmbeddingModel.BGESmallZH]: {
+    repo: "Qdrant/bge-small-zh-v1.5",
+    modelFile: "model_optimized.onnx",
+    pooling: Pooling.CLS,
+  },
+  [EmbeddingModel.MLE5Large]: {
+    repo: "Qdrant/multilingual-e5-large-onnx",
+    modelFile: "model.onnx",
+    additionalFiles: ["model.onnx_data"],
+    pooling: Pooling.Mean,
+  },
+};
+
+const HF_ENDPOINT = process.env.HF_ENDPOINT || "https://huggingface.co";
+
 interface SparseModelInfo {
   model: SparseEmbeddingModel;
   vocabSize: number;
@@ -65,50 +132,42 @@ function normalize(v: number[]): number[] {
   return v.map((val) => val / Math.max(norm, epsilon));
 }
 
-function getEmbeddings(
-  data: number[],
-  dimensions: [number, number, number]
+// Pools the token embeddings of each text in the batch into a single embedding
+function poolEmbeddings(
+  data: Float32Array,
+  dimensions: [number, number, number],
+  attentionMask: bigint[][],
+  pooling: Pooling
 ): number[][] {
-  const [x, y, z] = dimensions;
+  const [batchSize, seqLen, hiddenSize] = dimensions;
 
-  return new Array(x).fill(undefined).map((_, index) => {
-    const startIndex = index * y * z;
-    const endIndex = startIndex + z;
-    return data.slice(startIndex, endIndex);
+  return Array.from({ length: batchSize }, (_, batchIdx) => {
+    const offset = batchIdx * seqLen * hiddenSize;
+    if (pooling === Pooling.CLS) {
+      return Array.from(data.subarray(offset, offset + hiddenSize));
+    }
+
+    // Mean of the token embeddings, ignoring padding tokens
+    const sum = new Array<number>(hiddenSize).fill(0);
+    let tokenCount = 0;
+    for (let seqIdx = 0; seqIdx < seqLen; seqIdx++) {
+      if (attentionMask[batchIdx][seqIdx] === 0n) continue;
+      tokenCount++;
+      const tokenOffset = offset + seqIdx * hiddenSize;
+      for (let i = 0; i < hiddenSize; i++) {
+        sum[i] += data[tokenOffset + i];
+      }
+    }
+    return sum.map((val) => val / Math.max(tokenCount, 1e-9));
   });
 }
 
-// Remove attention pooling
-// Ref: https://github.com/qdrant/fastembed/commit/a335c8898f11042fdb311fce2dab3acf50c23011
-// function create3DArray(
-//   inputArray: number[],
-//   dimensions: number[]
-// ): number[][][] {
-//   const totalElements = dimensions.reduce((acc, val) => acc * val, 1);
-
-//   if (inputArray.length !== totalElements) {
-//     throw new Error(
-//       "Input array length does not match the specified dimensions."
-//     );
-//   }
-
-//   const resultArray = Array.from({ length: dimensions[0] }, (_, i) =>
-//     Array.from({ length: dimensions[1] }, (_, j) =>
-//       Array.from(
-//         { length: dimensions[2] },
-//         (_, k) =>
-//           inputArray[i * dimensions[1] * dimensions[2] + j * dimensions[2] + k]
-//       )
-//     )
-//   );
-
-//   return resultArray;
-// }
 // Cas standard
 export interface InitStandardOptions extends InitOptionsBase {
   model: Exclude<EmbeddingModel, EmbeddingModel.CUSTOM>;
   modelAbsoluteDirPath?: undefined;
   modelName?: string;
+  pooling?: undefined;
 }
 
 // Cas custom
@@ -116,6 +175,8 @@ export interface InitCustomOptions extends InitOptionsBase {
   model: EmbeddingModel.CUSTOM;
   modelAbsoluteDirPath: fs.PathLike;
   modelName: string;
+  // How token embeddings are pooled into one embedding. Defaults to CLS
+  pooling?: Pooling;
 }
 export type InitOptions = InitStandardOptions | InitCustomOptions;
 
@@ -172,7 +233,8 @@ export class FlagEmbedding extends Embedding {
   private constructor(
     private tokenizer: Tokenizer,
     private session: ort.InferenceSession,
-    private model: EmbeddingModel
+    private model: EmbeddingModel,
+    private pooling: Pooling
   ) {
     super();
   }
@@ -186,6 +248,7 @@ export class FlagEmbedding extends Embedding {
     showDownloadProgress = true,
     modelAbsoluteDirPath = "",
     modelName = "",
+    pooling = Pooling.CLS,
   }: Partial<InitOptions> = {}) {
     if (model === EmbeddingModel.CUSTOM) {
       if (!modelAbsoluteDirPath) {
@@ -210,10 +273,7 @@ export class FlagEmbedding extends Embedding {
 
     const tokenizer = this.loadTokenizer(modelDir, maxLength);
     const defaultModelName =
-      model === EmbeddingModel.MLE5Large ||
-      model === EmbeddingModel.AllMiniLML6V2
-        ? "model.onnx"
-        : "model_optimized.onnx";
+      model === EmbeddingModel.CUSTOM ? "" : MODEL_SOURCES[model].modelFile;
     const modelPath = path.join(
       modelDir.toString(),
       modelName || defaultModelName
@@ -225,7 +285,12 @@ export class FlagEmbedding extends Embedding {
       executionProviders,
       graphOptimizationLevel: "all",
     });
-    return new FlagEmbedding(tokenizer, session, model);
+    return new FlagEmbedding(
+      tokenizer,
+      session,
+      model,
+      model === EmbeddingModel.CUSTOM ? pooling : MODEL_SOURCES[model].pooling
+    );
   }
 
   private static loadTokenizer(
@@ -289,112 +354,78 @@ export class FlagEmbedding extends Embedding {
     return tokenizer;
   }
 
-  private static async downloadFileFromGCS(
-    outputFilePath: PathLike,
-    model: string,
+  private static async downloadFileFromHF(
+    outputFilePath: string,
+    repo: string,
+    fileName: string,
     showDownloadProgress: boolean = true
-  ): Promise<PathLike> {
+  ): Promise<void> {
     if (fs.existsSync(outputFilePath)) {
-      return outputFilePath;
+      return;
     }
 
-    // The AllMiniLML6V2 model URL doesn't follow the same naming convention as the other models
-    // So, we transform "fast-all-MiniLM-L6-v2" -> "sentence-transformers-all-MiniLM-L6-v2" in the download URL
-    // The model directory name in the GCS storage remains "fast-all-MiniLM-L6-v2"
-    if (model === EmbeddingModel.AllMiniLML6V2) {
-      model = "sentence-transformers" + model.substring(model.indexOf("-"));
+    const url = `${HF_ENDPOINT}/${repo}/resolve/main/${fileName}`;
+    const response = await fetch(url);
+    if (!response.ok || !response.body) {
+      throw new Error(
+        `Failed to download ${url}: ${response.status} ${response.statusText}`
+      );
     }
-    const url = `https://storage.googleapis.com/qdrant-fastembed/${model}.tar.gz`;
-    const fileStream = fs.createWriteStream(outputFilePath);
 
-    return new Promise<PathLike>((resolve, reject) => {
-      https
-        .get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (response) => {
-          const totalSizeInBytes = parseInt(
-            response.headers["content-length"] || "0",
-            10
-          );
+    const totalSizeInBytes = parseInt(
+      response.headers.get("content-length") || "0",
+      10
+    );
+    const progressBar =
+      showDownloadProgress && totalSizeInBytes > 0
+        ? new Progress(`Downloading ${repo}/${fileName} [:bar] :percent :etas`, {
+            complete: "=",
+            width: 20,
+            total: totalSizeInBytes,
+          })
+        : undefined;
 
-          if (totalSizeInBytes === 0) {
-            console.warn(
-              `Warning: Content-length header is missing or zero in the response from ${url}.`
-            );
-          }
-
-          if (showDownloadProgress) {
-            const progressBar = new Progress(
-              `Downloading ${model} [:bar] :percent :etas`,
-              {
-                complete: "=",
-                width: 20,
-                total: totalSizeInBytes,
-              }
-            );
-
-            response.on("data", (chunk) => {
-              progressBar.tick(chunk.length, { speed: "N/A" });
-            });
-          }
-          response.on("error", (error) => {
-            reject(error);
-          });
-
-          response.pipe(fileStream);
-
-          fileStream.on("finish", () => {
-            fileStream.close();
-            resolve(outputFilePath);
-          });
-
-          fileStream.on("error", (error) => {
-            reject(error);
-          });
-        })
-        .on("error", (error) => {
-          fs.unlink(outputFilePath, () => {
-            reject(error);
-          });
-        });
+    // Write to a temporary file first, so an interrupted download is never mistaken for a complete one
+    const partialFilePath = `${outputFilePath}.part`;
+    fs.mkdirSync(path.dirname(outputFilePath), {
+      recursive: true,
+      mode: 0o777,
     });
-  }
-
-  private static async decompressToCache(
-    targzPath: PathLike,
-    cacheDir: PathLike
-  ) {
-    // Implementation for decompressing a .tar.gz file to a cache directory
-    if (path.extname(targzPath.toString()) === ".gz") {
-      await tar.x({
-        file: targzPath,
-        // @ts-ignore
-        cwd: cacheDir,
-      });
-    } else {
-      throw new Error(`Unsupported file extension: ${targzPath}`);
+    try {
+      await pipeline(
+        Readable.fromWeb(response.body as ReadableStream<Uint8Array>),
+        new Transform({
+          transform(chunk, _encoding, callback) {
+            progressBar?.tick(chunk.length);
+            callback(null, chunk);
+          },
+        }),
+        fs.createWriteStream(partialFilePath)
+      );
+    } catch (error) {
+      fs.rmSync(partialFilePath, { force: true });
+      throw error;
     }
+    fs.renameSync(partialFilePath, outputFilePath);
   }
 
   private static async retrieveModel(
-    model: EmbeddingModel,
+    model: Exclude<EmbeddingModel, EmbeddingModel.CUSTOM>,
     cacheDir: PathLike,
     showDownloadProgress: boolean = true
   ): Promise<PathLike> {
-    if (!fs.existsSync(cacheDir)) {
-      fs.mkdirSync(cacheDir, {
-        mode: 0o777,
-      });
+    const { repo, modelFile, additionalFiles = [] } = MODEL_SOURCES[model];
+    const modelDir = path.join(cacheDir.toString(), repo.replace("/", "_"));
+
+    // Files already present are skipped, so an interrupted download resumes with the missing files
+    for (const fileName of [modelFile, ...additionalFiles, ...TOKENIZER_FILES]) {
+      await this.downloadFileFromHF(
+        path.join(modelDir, fileName),
+        repo,
+        fileName,
+        showDownloadProgress
+      );
     }
-
-    const modelDir = path.join(cacheDir.toString(), model);
-
-    if (fs.existsSync(modelDir)) {
-      return modelDir;
-    }
-
-    const modelTarGz = path.join(cacheDir.toString(), `${model}.tar.gz`);
-    await this.downloadFileFromGCS(modelTarGz, model, showDownloadProgress);
-    await this.decompressToCache(modelTarGz, cacheDir);
-    fs.unlinkSync(modelTarGz);
     return modelDir;
   }
 
@@ -451,35 +482,11 @@ export class FlagEmbedding extends Embedding {
 
       const output = await this.session.run(inputs);
 
-      // Remove attention pooling
-      // Ref: https://github.com/qdrant/fastembed/commit/a335c8898f11042fdb311fce2dab3acf50c23011
-
-      // const lastHiddenState: number[][][] = create3DArray(
-      //   output.last_hidden_state.data as unknown[] as number[],
-      //   output.last_hidden_state.dims as number[]
-      // );
-
-      // const embeddings = lastHiddenState.map((layer, layerIdx) => {
-      //   const weightedSum = layer.reduce((acc, tokenEmbedding, idx) => {
-      //     const attentionWeight = maskArray[layerIdx][idx];
-      //     return acc.map(
-      //       (val, i) => val + tokenEmbedding[i] * Number(attentionWeight)
-      //     );
-      //   }, new Array(layer[0].length).fill(0));
-
-      //   const inputMaskSum = maskArray[layerIdx].reduce(
-      //     (acc, attentionWeight) => acc + Number(attentionWeight),
-      //     0
-      //   );
-
-      //   return weightedSum.map((val) => val / Math.max(inputMaskSum, 1e-9));
-      // });
-
-      // const embeddings = lastHiddenState.map((sentence) => sentence[0]);
-
-      const embeddings = getEmbeddings(
-        output.last_hidden_state.data as unknown[] as number[],
-        output.last_hidden_state.dims as [number, number, number]
+      const embeddings = poolEmbeddings(
+        output.last_hidden_state.data as Float32Array,
+        output.last_hidden_state.dims as [number, number, number],
+        maskArray,
+        this.pooling
       );
 
       yield embeddings.map(normalize);

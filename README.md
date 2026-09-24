@@ -2,8 +2,8 @@
   <h1><a href="https://www.npmjs.com/package/fastembed">FastEmbed-js ⚡️</a></h1>
   <h3>Typescript/NodeJS implementation of <a href="https://github.com/qdrant/fastembed" target="_blank">@Qdrant/fastembed</a></h3>
   <a href="https://www.npmjs.com/package/fastembed"><img src="https://img.shields.io/npm/v/fastembed.svg" alt="Crates.io"></a>
-  <a href="https://github.com/Anush008/fastembed-js/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-mit-blue.svg" alt="MIT Licensed"></a>
-  <a href="https://github.com/Anush008/fastembed-js/actions/workflows/release.yml"><img src="https://github.com/Anush008/fastembed-js/actions/workflows/release.yml/badge.svg?branch=main" alt="Semantic release"></a>
+  <a href="https://github.com/qdrant-labs/fastembed-js/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-mit-blue.svg" alt="MIT Licensed"></a>
+  <a href="https://github.com/qdrant-labs/fastembed-js/actions/workflows/release.yml"><img src="https://github.com/qdrant-labs/fastembed-js/actions/workflows/release.yml/badge.svg?branch=main" alt="Semantic release"></a>
 </div>
 
 ## 🍕 Features
@@ -98,4 +98,4 @@ It's important we justify the "fast" in FastEmbed. FastEmbed is fast because:
 
 ## © LICENSE
 
-MIT © [2023](https://github.com/Anush008/fastembed-js/blob/main/LICENSE)
+MIT © [2026](https://github.com/qdrant-labs/fastembed-js/blob/main/LICENSE)

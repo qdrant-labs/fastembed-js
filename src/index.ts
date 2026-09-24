@@ -2,6 +2,7 @@ export {
   EmbeddingModel,
   ExecutionProvider,
   FlagEmbedding,
+  Pooling,
   SparseEmbeddingModel,
   SparseTextEmbedding,
   SparseVector
