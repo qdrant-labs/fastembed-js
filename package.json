@@ -9,7 +9,10 @@
     "semantic",
     "search"
   ],
-  "repository": "github:qdrant-labs/fastembed-js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qdrant-labs/fastembed-js.git"
+  },
   "license": "MIT",
   "author": "Anush008 <mail@anush.sh>",
   "exports": {
