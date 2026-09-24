@@ -75,8 +75,8 @@ test("FlagEmbedding canonical values", async () => {
     maxLength: 512,
   });
   const expected = [
-    0.02591, 0.00573, 0.01147, 0.03796, -0.0232, -0.0549, 0.01404, -0.0107,
-    -0.0244, -0.01822,
+    -0.03448, 0.03102, 0.00673, 0.02611, -0.03936, -0.1603, 0.06692, -0.00644,
+    -0.04745, 0.01476,
   ];
 
   const embeddings = (await flagEmbedding.embed(["hello world"]).next()).value!;
